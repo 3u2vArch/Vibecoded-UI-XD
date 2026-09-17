@@ -1,27 +1,23 @@
 --[[
 	CoreUI — a self-contained Roblox Lua UI library
 	----------------------------------------------------------------
-	Style reference: dark background, green accent, left icon sidebar,
-	card-style "groupboxes" with title + description (à la the
-	provided screenshot). No gameplay logic of any kind lives in this
-	file — it is purely a windowing / widget toolkit, the same way
-	Rayfield, Fluent or Obsidian are toolkits. Wire up your own
-	Callback functions to do whatever your script needs.
+	Patched build:
+	  • Enum.AutomaticCanvasSize → Enum.AutomaticSize (doesn't exist in Roblox)
+	  • Icons.Get now validates the provider returns an actual ImageLabel
+	  • Window:SetStatus(text) added
+	  • Lucide provider auto-detects common API shapes
 
 	Usage:
 		local CoreUI = loadstring(readfile("CoreUI.lua"))()
-		-- or: local CoreUI = require(path.to.CoreUI)
-
-	See "CoreUI Example.lua" for a full usage example.
 ]]
 
-local TweenService   = game:GetService("TweenService")
+local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local RunService     = game:GetService("RunService")
-local Players        = game:GetService("Players")
-local HttpService    = game:GetService("HttpService")
-local TextService    = game:GetService("TextService")
-local CoreGui        = game:GetService("CoreGui")
+local RunService       = game:GetService("RunService")
+local Players          = game:GetService("Players")
+local HttpService      = game:GetService("HttpService")
+local TextService      = game:GetService("TextService")
+local CoreGui          = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer and LocalPlayer:GetMouse()
@@ -88,8 +84,6 @@ function Util.Lerp(a, b, t)
 	return a + (b - a) * t
 end
 
--- Make a GuiObject draggable using `handle` as the grab area.
--- Works for both mouse and touch. Returns a disconnect function.
 function Util.Draggify(frame, handle, onDragStart, onDragEnd)
 	handle = handle or frame
 	local dragging = false
@@ -159,24 +153,50 @@ end
 --============================================================
 -- ICONS (Lucide)
 --============================================================
--- Provide your own loaded Lucide module (github.com/latte-soft/lucide-roblox)
--- via CoreUI:SetIconProvider(LucideModule). If none is supplied, icon
--- requests silently no-op so the rest of the UI still works.
+-- lucide-roblox exposes several API shapes across versions. We try
+-- the common ones in order and only accept an actual ImageLabel.
 
-local Icons = { Provider = nil }
+local Icons = { Provider = nil, _shape = nil }
+
+local function tryIcon(provider, shape, name, size, overrides)
+	local ok, result = pcall(function()
+		if shape == "ImageLabel" then
+			return provider.ImageLabel(name, size, overrides)
+		elseif shape == "Image" then
+			return provider.Image(name, size, overrides)
+		elseif shape == "Get" then
+			return provider:Get(name, size, overrides)
+		elseif shape == "getIcon" then
+			return provider:getIcon(name, size, overrides)
+		elseif shape == "Icon" then
+			return provider.Icon(name, size, overrides)
+		end
+	end)
+	if ok and typeof(result) == "Instance" and result:IsA("ImageLabel") then
+		return result
+	end
+	return nil
+end
 
 function Icons.SetProvider(mod)
 	Icons.Provider = mod
+	Icons._shape = nil
+	if not mod then return end
+
+	-- Probe for a working shape using a known-good icon name.
+	for _, shape in ipairs({ "ImageLabel", "Image", "Get", "getIcon", "Icon" }) do
+		local probe = tryIcon(mod, shape, "home", 16, {})
+		if probe then
+			Icons._shape = shape
+			probe:Destroy()
+			break
+		end
+	end
 end
 
--- Returns an ImageLabel (or nil if no provider / icon not found)
 function Icons.Get(name, size, overrides)
-	if not name or not Icons.Provider then return nil end
-	local ok, imgLabel = pcall(function()
-		return Icons.Provider.ImageLabel(name, size or 18, overrides or {})
-	end)
-	if ok then return imgLabel end
-	return nil
+	if not name or not Icons.Provider or not Icons._shape then return nil end
+	return tryIcon(Icons.Provider, Icons._shape, name, size or 18, overrides or {})
 end
 
 --============================================================
@@ -231,10 +251,9 @@ Themes.EvilSpotix = {
 	SubText      = Color3.fromRGB(141, 150, 163),
 	MutedText    = Color3.fromRGB(96, 103, 114),
 
-	-- Every green from Spotix becomes red here.
-	Accent       = Color3.fromRGB(239, 68, 68),   -- was 34,197,94
-	AccentDark   = Color3.fromRGB(153, 27, 27),   -- was 21,128,61
-	AccentText   = Color3.fromRGB(24, 6, 6),      -- was 6,20,12
+	Accent       = Color3.fromRGB(239, 68, 68),
+	AccentDark   = Color3.fromRGB(153, 27, 27),
+	AccentText   = Color3.fromRGB(24, 6, 6),
 
 	Danger       = Color3.fromRGB(239, 68, 68),
 	Warning      = Color3.fromRGB(234, 179, 8),
@@ -275,10 +294,10 @@ Themes.Obsidian = {
 local CoreUI = {}
 CoreUI.__index = CoreUI
 
-CoreUI.Flags = {}          -- Flag -> value
-CoreUI.Options = {}        -- Flag -> element object (for config saving / get/set)
-CoreUI._ThemeListeners = {} -- fn(theme) called whenever theme changes
-CoreUI._Connections = {}   -- global connections cleaned on Unload
+CoreUI.Flags = {}
+CoreUI.Options = {}
+CoreUI._ThemeListeners = {}
+CoreUI._Connections = {}
 CoreUI._KeybindElements = {}
 CoreUI.Theme = Themes.Spotix
 CoreUI.Loaded = false
@@ -326,7 +345,6 @@ local ScreenGui = New("ScreenGui", {
 })
 CoreUI.ScreenGui = ScreenGui
 
--- Global scale object for DPI scaling, applied to every window
 local GlobalScale = New("UIScale", { Scale = 1, Parent = nil })
 
 local TooltipLayer = New("Frame", {
@@ -423,8 +441,6 @@ local function HideTooltip()
 	end
 end
 
--- Attach a tooltip to `target`. `disabledReason`, if provided, is shown
--- instead of `text` whenever `isDisabledFn()` returns true.
 function CoreUI:AttachTooltip(target, text, isDisabledFn, disabledReason)
 	local theme = self.Theme
 	local hovering = false
@@ -469,7 +485,6 @@ end
 -- NOTIFICATIONS
 --============================================================
 
--- CoreUI:Notify({ Title, Content, Duration, Type = "Info"|"Success"|"Warning"|"Error", Steps = {"Step 1","Step 2",...} })
 function CoreUI:Notify(config)
 	config = config or {}
 	local theme = self.Theme
@@ -493,7 +508,7 @@ function CoreUI:Notify(config)
 		Parent = card,
 	}, { Util.Corner(2) })
 
-	local layout = New("UIListLayout", {
+	New("UIListLayout", {
 		Parent = card,
 		SortOrder = Enum.SortOrder.LayoutOrder,
 		Padding = UDim.new(0, 4),
@@ -527,7 +542,6 @@ function CoreUI:Notify(config)
 		})
 	end
 
-	-- Steps (progress checklist)
 	if config.Steps then
 		local stepsHolder = New("Frame", {
 			BackgroundTransparency = 1,
@@ -685,9 +699,7 @@ end
 CoreUI.Destroy = CoreUI.Unload
 
 --============================================================
--- SHARED ELEMENT ROW BUILDER
--- Every basic control (toggle, slider, dropdown, etc.) shares the
--- same row layout: [Icon] Title / Description  ......  [Control]
+-- SHARED ROW BUILDER
 --============================================================
 
 local function BuildRow(parent, theme, opts)
@@ -779,10 +791,6 @@ local function CreateLabel(parent, theme, text)
 	return obj
 end
 
---============================================================
--- ELEMENT: DIVIDER
---============================================================
-
 local function CreateDivider(parent, theme)
 	return New("Frame", {
 		BackgroundColor3 = theme.Divider,
@@ -791,13 +799,9 @@ local function CreateDivider(parent, theme)
 	})
 end
 
---============================================================
--- ELEMENT: WARNING BOX
---============================================================
-
 local function CreateWarningBox(parent, theme, opts)
 	opts = opts or {}
-	local kind = opts.Type or "Warning" -- Warning | Error | Info
+	local kind = opts.Type or "Warning"
 	local color = theme.Warning
 	if kind == "Error" then color = theme.Danger end
 	if kind == "Info" then color = theme.Info end
@@ -868,9 +872,7 @@ local function CreateButton(parent, theme, opts)
 	}, { Util.Corner(6) })
 
 	track(btn.MouseButton1Click:Connect(function()
-		if opts.Callback then
-			task.spawn(opts.Callback)
-		end
+		if opts.Callback then task.spawn(opts.Callback) end
 	end))
 	track(btn.MouseEnter:Connect(function()
 		Util.Tween(btn, 0.12, { BackgroundColor3 = theme.AccentDark })
@@ -892,7 +894,7 @@ local function CreateButton(parent, theme, opts)
 end
 
 --============================================================
--- ELEMENT: TOGGLE  (and Checkbox, which reuses this with Square=true)
+-- ELEMENT: TOGGLE / CHECKBOX
 --============================================================
 
 local function CreateToggleBase(parent, theme, opts, square)
@@ -903,8 +905,8 @@ local function CreateToggleBase(parent, theme, opts, square)
 	})
 
 	local state = opts.Default or false
-
 	local switch, knob
+
 	if square then
 		switch = New("Frame", {
 			BackgroundColor3 = state and theme.Accent or theme.CardAlt,
@@ -924,12 +926,12 @@ local function CreateToggleBase(parent, theme, opts, square)
 		})
 	else
 		switch = New("Frame", {
-			BackgroundColor3 = state and theme.Accent or theme.ToggleOff,
-			AnchorPoint = Vector2.new(1, 0.5),
-			Position = UDim2.new(1, 0, 0.5, 0),
-			Size = UDim2.fromOffset(38, 20),
-			Parent = controlArea,
-		}, { Util.Corner(10) })
+				BackgroundColor3 = state and theme.Accent or theme.ToggleOff,
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, 0, 0.5, 0),
+				Size = UDim2.fromOffset(38, 20),
+				Parent = controlArea,
+			}, { Util.Corner(10) })
 		knob = New("Frame", {
 			BackgroundColor3 = Color3.new(1, 1, 1),
 			Size = UDim2.fromOffset(16, 16),
@@ -986,7 +988,7 @@ local function CreateToggleBase(parent, theme, opts, square)
 end
 
 --============================================================
--- ELEMENT: TEXT INPUT
+-- ELEMENT: INPUT
 --============================================================
 
 local function CreateInput(parent, theme, opts)
@@ -1126,16 +1128,12 @@ local function CreateSlider(parent, theme, opts)
 
 	local obj = { Instance = row, Flag = opts.Flag }
 
-	local function beginDrag(input)
-		if obj._disabled then return end
-		dragging = true
-		local frac = (input.Position.X - rail.AbsolutePosition.X) / rail.AbsoluteSize.X
-		setFromFrac(frac)
-	end
-
 	track(hit.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			beginDrag(input)
+			if obj._disabled then return end
+			dragging = true
+			local frac = (input.Position.X - rail.AbsolutePosition.X) / rail.AbsoluteSize.X
+			setFromFrac(frac)
 		end
 	end))
 	track(UserInputService.InputChanged:Connect(function(input)
@@ -1174,7 +1172,7 @@ local function CreateSlider(parent, theme, opts)
 end
 
 --============================================================
--- ELEMENT: DROPDOWN (single + multi share this)
+-- ELEMENT: DROPDOWN
 --============================================================
 
 local function CreateDropdownBase(parent, theme, opts, multi)
@@ -1218,7 +1216,7 @@ local function CreateDropdownBase(parent, theme, opts, multi)
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Parent = box,
 	})
-	local arrow = New("TextLabel", {
+	New("TextLabel", {
 		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -8, 0.5, 0),
@@ -1230,7 +1228,6 @@ local function CreateDropdownBase(parent, theme, opts, multi)
 		Parent = box,
 	})
 
-	-- Popup list, parented to ScreenGui so it can float above everything
 	local popup = New("Frame", {
 		BackgroundColor3 = theme.Card,
 		Visible = false,
@@ -1243,7 +1240,7 @@ local function CreateDropdownBase(parent, theme, opts, multi)
 		BackgroundTransparency = 1,
 		Size = UDim2.fromScale(1, 1),
 		CanvasSize = UDim2.new(),
-		AutomaticCanvasSize = Enum.AutomaticCanvasSize.Y,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		ScrollBarThickness = 3,
 		ZIndex = 500,
 		Parent = popup,
@@ -1310,7 +1307,7 @@ local function CreateDropdownBase(parent, theme, opts, multi)
 			optionButtons[name] = optBtn
 		end
 	end
-	obj.Refresh(obj, options)
+	obj:Refresh(options)
 
 	local open = false
 	closePopup = function()
@@ -1369,7 +1366,7 @@ end
 local function CreateKeybind(parent, theme, opts)
 	opts = opts or {}
 	local currentKey = opts.Default
-	local mode = opts.Mode or "Toggle" -- "Toggle" | "Always" | "Hold"
+	local mode = opts.Mode or "Toggle"
 	local boundState = false
 
 	local row, controlArea = BuildRow(parent, theme, {
@@ -1659,7 +1656,7 @@ local function NewGroupbox(parent, theme, title, description)
 		Parent = parent,
 	}, { Util.Corner(10), Util.Stroke(theme.Border, 1), Util.Pad(14, 14, 14, 14) })
 
-	local list = New("UIListLayout", {
+	New("UIListLayout", {
 		Parent = frame,
 		SortOrder = Enum.SortOrder.LayoutOrder,
 		Padding = UDim.new(0, 8),
@@ -1700,8 +1697,7 @@ local function NewGroupbox(parent, theme, title, description)
 		end
 	end
 
-	local self = setmetatable({ Instance = frame, Theme = theme, _order = 1 }, Groupbox)
-	return self
+	return setmetatable({ Instance = frame, Theme = theme, _order = 1 }, Groupbox)
 end
 
 local function nextOrder(self)
@@ -1771,7 +1767,7 @@ function Groupbox:AddColorPicker(opts)
 end
 
 --============================================================
--- TABBOX (a groupbox that internally has its own pill-tab switcher)
+-- TABBOX
 --============================================================
 
 local function NewTabbox(parent, theme)
@@ -1781,7 +1777,6 @@ local function NewTabbox(parent, theme)
 		AutomaticSize = Enum.AutomaticSize.Y,
 		Parent = parent,
 	}, { Util.Corner(10), Util.Stroke(theme.Border, 1), Util.Pad(10, 10, 10, 10) })
-
 	New("UIListLayout", { Parent = outer, Padding = UDim.new(0, 8) })
 
 	local pillBar = New("Frame", {
@@ -1848,7 +1843,7 @@ local function NewTabbox(parent, theme)
 end
 
 --============================================================
--- TAB  (sidebar entry + content page, holds groupboxes)
+-- TAB (declaration only — methods added later)
 --============================================================
 
 local Tab = {}
@@ -1879,7 +1874,6 @@ function CoreUI:CreateWindow(config)
 		Parent = ScreenGui,
 	}, { Util.Corner(12), Util.Stroke(theme.Border, 1), GlobalScale })
 
-	-- ===== Top bar =====
 	local topbar = New("Frame", {
 		BackgroundColor3 = theme.Topbar,
 		Size = UDim2.new(1, 0, 0, 52),
@@ -1924,7 +1918,7 @@ function CoreUI:CreateWindow(config)
 		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -76, 0.5, 0),
-		Size = UDim2.new(0, 140, 0, 20),
+		Size = UDim2.new(0, 160, 0, 20),
 		Text = config.Status or "",
 		Font = theme.Font,
 		TextSize = 13,
@@ -1956,7 +1950,6 @@ function CoreUI:CreateWindow(config)
 		Parent = topbar,
 	})
 
-	-- ===== Body: sidebar + content =====
 	local body = New("Frame", {
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 0, 0, 52),
@@ -1968,7 +1961,7 @@ function CoreUI:CreateWindow(config)
 		BackgroundColor3 = theme.Sidebar,
 		Size = UDim2.new(0, 190, 1, 0),
 		CanvasSize = UDim2.new(),
-		AutomaticCanvasSize = Enum.AutomaticCanvasSize.Y,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		ScrollBarThickness = 3,
 		BorderSizePixel = 0,
 		Parent = body,
@@ -1983,7 +1976,6 @@ function CoreUI:CreateWindow(config)
 		Parent = body,
 	}, { Util.Pad(16, 16, 16, 16) })
 
-	-- ===== Resize grip =====
 	local grip = New("Frame", {
 		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(1, 1),
@@ -1997,10 +1989,8 @@ function CoreUI:CreateWindow(config)
 		TextColor3 = theme.MutedText, Font = theme.Font, TextSize = 14, Parent = grip,
 	})
 
-	-- Dragging (topbar drags whole window)
 	Util.Draggify(main, topbar)
 
-	-- Resizing
 	do
 		local resizing = false
 		track(grip.InputBegan:Connect(function(input)
@@ -2032,7 +2022,6 @@ function CoreUI:CreateWindow(config)
 		Visible = true,
 	}, Window)
 
-	-- Close / minimize / toggle
 	local minimized = false
 	track(closeBtn.MouseButton1Click:Connect(function() win:SetVisible(false) end))
 	track(minimizeBtn.MouseButton1Click:Connect(function()
@@ -2051,7 +2040,6 @@ function CoreUI:CreateWindow(config)
 		end
 	end))
 
-	-- Mobile floating toggle bubble
 	if Util.IsMobile() then
 		local bubble = New("TextButton", {
 			BackgroundColor3 = theme.Accent,
@@ -2075,12 +2063,16 @@ function CoreUI:CreateWindow(config)
 		main.Visible = v
 	end
 
+	function win:SetStatus(text)
+		statusText.Text = text or ""
+	end
+
 	function win:CreateTab(name, iconName)
 		local page = New("ScrollingFrame", {
 			BackgroundTransparency = 1,
 			Size = UDim2.fromScale(1, 1),
 			CanvasSize = UDim2.new(),
-			AutomaticCanvasSize = Enum.AutomaticCanvasSize.Y,
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
 			ScrollBarThickness = 3,
 			Visible = false,
 			Parent = contentHolder,
@@ -2147,14 +2139,14 @@ function CoreUI:CreateWindow(config)
 	return win
 end
 
--- Single full-width groupbox
+--============================================================
+-- TAB METHODS
+--============================================================
+
 function Tab:CreateGroupbox(title, description)
-	local gb = NewGroupbox(self.Columns, self.Theme, title, description)
-	return gb
+	return NewGroupbox(self.Columns, self.Theme, title, description)
 end
 
--- Two-column layout: call CreateLeftGroupbox / CreateRightGroupbox as needed;
--- they automatically share a row.
 function Tab:_getSplit()
 	if not self._split then
 		self._split = New("Frame", {
@@ -2196,8 +2188,7 @@ function Tab:CreateTabbox()
 end
 
 function Tab:CreateWarningBox(opts)
-	local o = CreateWarningBox(self.Columns, self.Theme, opts)
-	return o
+	return CreateWarningBox(self.Columns, self.Theme, opts)
 end
 
 --============================================================
